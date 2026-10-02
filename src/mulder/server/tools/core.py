@@ -36,6 +36,7 @@ from mulder.server.helpers import (
     windowed_response,
 )
 from mulder.server.tool_access import PLANNERS, Role, tool_access
+from mulder.timestamps import timestamp_key
 
 logger = logging.getLogger(__name__)
 
@@ -1308,7 +1309,7 @@ def get_timeline(
                 }
             )
 
-    flat.sort(key=lambda e: str(e.get("event_time") or ""))
+    flat.sort(key=lambda e: timestamp_key(str(e.get("event_time") or "")) or "")
     total_events = len(flat)
     capped = flat[:limit]
 

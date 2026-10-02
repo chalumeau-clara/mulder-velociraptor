@@ -194,6 +194,17 @@ def validate_extraction(summary: dict[str, Any] | None) -> GateResult:
     if not check_sources.passed:
         gaps.append("No sources indexed after extraction.")
 
+    collection_gaps = summary.get("collection_import_gaps", [])
+    if collection_gaps:
+        checks.append(
+            GateCheck(
+                name="collection_imports_complete",
+                passed=False,
+                detail="Velociraptor imports remain partial or incomplete",
+            )
+        )
+        gaps.append(f"Resolve or document collection import errors: {collection_gaps}")
+
     return GateResult(
         passed=all(c.passed for c in checks),
         phase_name="extraction",

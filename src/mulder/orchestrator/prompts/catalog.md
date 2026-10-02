@@ -7,7 +7,8 @@ REQUIRED ACTIONS:
 2. After scan_evidence returns, examine its output for the list of files
    and their paths. The output includes the full filesystem path for each
    file discovered.
-3. If compressed archives are found (.7z, .zip, .tar.gz, .rar, etc.),
+3. If generic compressed archives are found (.7z, .zip, .tar.gz, .rar,
+   etc.; excluding velociraptor_collection evidence),
    extract them using extract_archive. Pass the EXACT full path from the
    scan_evidence output as the archive_path argument.
    Do NOT guess paths. Use only paths returned by scan_evidence or
@@ -17,7 +18,7 @@ REQUIRED ACTIONS:
    by start_extraction_batch>") to block until extractions complete. Then
    check_extraction_status once. If any failed, retry individually with
    extract_archive using the exact path. Do not move on until all
-   archives are successfully extracted.
+   generic archives are successfully extracted.
 4. Call list_sources and get_source_stats to confirm what has been indexed.
 
 NOTE: Archives extracted here will persist for later phases. The
@@ -26,6 +27,13 @@ re-extracting. The extract_archive tool handles output location
 automatically; you do not need to specify extract_to.
 
 OUTPUT REQUIREMENTS:
+- For velociraptor_collection evidence, call inspect_velociraptor_collection.
+  Use the metadata hostname as the system name and evidence type
+  "velociraptor_collection". Group other evidence for that host with it when
+  supported by the evidence; do not assume collection time equals image time.
+  These ZIPs are imported in the extraction phase: do NOT extract them with
+  extract_archive. Record protected or invalid collections as unavailable;
+  do not repeatedly try generic archive extraction to bypass the error.
 - Discover every evidence file, classify its type, and identify the
   distinct systems or devices it belongs to.
 - A "system" is any distinct computer, device, phone, server, VM, or

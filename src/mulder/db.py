@@ -8,7 +8,7 @@ import logging
 import queue
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +37,7 @@ from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.pool import NullPool
 
 from mulder.models import CaseMetadataRow, Finding, SourceRow, WindowRow
+from mulder.timestamps import timestamp_key
 
 _T = TypeVar("_T")
 
@@ -233,6 +234,7 @@ def _make_engine(db_path: Path) -> Engine:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
+        dbapi_conn.create_function("mulder_time", 1, timestamp_key, deterministic=True)
 
     return engine
 
@@ -527,6 +529,147 @@ class CaseDB:
 
         return int(self._wq.submit(_do_register))
 
+    def import_record_source(
+        self,
+        source_name: str,
+        source_path: str,
+        source_hash: str,
+        extractor: str,
+        records: Iterable[tuple[int, str]],
+        timestamp_parser: Callable[[str], str | None] | None = None,
+        timestamp_version: str | None = None,
+    ) -> tuple[int, int, bool]:
+        """Atomically stream records into a source and its FTS index.
+
+        Return (source_id, record_count, already_indexed). A failed iterator
+        rolls back the entire source, so retries cannot mistake a partial import
+        for a completed one. Identity checks run inside the serialized writer.
+        ``source_hash`` identifies the input container; ``windows_hash`` commits
+        to the imported record text. Callers must use distinct member names.
+        """
+
+        def _import() -> tuple[int, int, bool]:
+            with self._engine.begin() as conn:
+                existing = conn.execute(
+                    select(sources_t.c.source_id, sources_t.c.line_count).where(
+                        sources_t.c.source_name == source_name,
+                        sources_t.c.source_hash == source_hash,
+                        sources_t.c.extractor == extractor,
+                    )
+                ).first()
+                if existing is not None:
+                    if timestamp_parser is not None and timestamp_version is not None:
+                        self._backfill_record_times(
+                            conn,
+                            int(existing[0]),
+                            timestamp_parser,
+                            timestamp_version,
+                        )
+                    return int(existing[0]), int(existing[1]), True
+                result = conn.execute(
+                    insert(sources_t).values(
+                        case_id=self._get_case_id(),
+                        source_name=source_name,
+                        source_path=source_path,
+                        source_hash=source_hash,
+                        extractor=extractor,
+                        line_count=0,
+                        ingested_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+                assert result.inserted_primary_key is not None
+                source_id = int(result.inserted_primary_key[0])
+                digest = hashlib.blake2b(digest_size=32)
+                batch: list[dict[str, object]] = []
+                batch_bytes = 0
+                count = 0
+                for line, raw_text in records:
+                    encoded = raw_text.encode()
+                    digest.update(encoded)
+                    batch_bytes += len(encoded)
+                    batch.append(
+                        {
+                            "source_id": source_id,
+                            "line_start": line,
+                            "line_end": line,
+                            "event_time": timestamp_parser(raw_text) if timestamp_parser else None,
+                            "raw_text": raw_text,
+                        }
+                    )
+                    count += 1
+                    if len(batch) >= 500 or batch_bytes >= 4 * 1024 * 1024:
+                        conn.execute(insert(windows_t), batch)
+                        batch = []
+                        batch_bytes = 0
+                if batch:
+                    conn.execute(insert(windows_t), batch)
+                conn.execute(
+                    text(
+                        "INSERT INTO windows_fts(rowid, raw_text) "
+                        "SELECT window_id, raw_text FROM windows WHERE source_id = :sid"
+                    ),
+                    {"sid": source_id},
+                )
+                conn.execute(
+                    update(sources_t)
+                    .where(sources_t.c.source_id == source_id)
+                    .values(
+                        line_count=count,
+                        windows_hash="blake2b:" + digest.hexdigest(),
+                    )
+                )
+                if timestamp_parser is not None and timestamp_version is not None:
+                    self._record_timestamp_version(conn, source_id, timestamp_version)
+                return source_id, count, False
+
+        return self._wq.submit(_import)
+
+    @staticmethod
+    def _record_timestamp_version(conn: Connection, source_id: int, version: str) -> None:
+        key = f"record_timestamps:{source_id}"
+        conn.execute(delete(kv_store_t).where(kv_store_t.c.key == key))
+        conn.execute(
+            insert(kv_store_t).values(
+                key=key,
+                value=version,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+    @classmethod
+    def _backfill_record_times(
+        cls,
+        conn: Connection,
+        source_id: int,
+        parser: Callable[[str], str | None],
+        version: str,
+    ) -> None:
+        previous = conn.execute(
+            select(kv_store_t.c.value).where(
+                kv_store_t.c.key == f"record_timestamps:{source_id}",
+            )
+        ).scalar_one_or_none()
+        if previous == version:
+            return
+        # Keyset pagination avoids materializing an entire source or updating
+        # a table while a SELECT cursor over that table is still open.
+        last_id = 0
+        while rows := conn.execute(
+            select(windows_t.c.window_id, windows_t.c.raw_text)
+            .where(
+                windows_t.c.source_id == source_id,
+                windows_t.c.window_id > last_id,
+            )
+            .order_by(windows_t.c.window_id)
+            .limit(500)
+        ).all():
+            conn.execute(
+                text("UPDATE windows SET event_time=:ts WHERE window_id=:wid"),
+                [{"ts": parser(row.raw_text), "wid": row.window_id} for row in rows],
+            )
+            last_id = rows[-1].window_id
+        cls._record_timestamp_version(conn, source_id, version)
+
     def insert_windows(self, source_id: int, windows: list[WindowRow]) -> None:
         """Bulk-insert window rows and populate the FTS index."""
         if not windows:
@@ -639,9 +782,13 @@ class CaseDB:
             stmt = stmt.where(windows_t.c.source_id.in_(source_ids))
 
         if time_start is not None:
-            stmt = stmt.where(windows_t.c.event_time >= time_start)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) >= func.mulder_time(time_start)
+            )
         if time_end is not None:
-            stmt = stmt.where(windows_t.c.event_time <= time_end)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) <= func.mulder_time(time_end)
+            )
 
         if exclude_source_names:
             for prefix in exclude_source_names:
@@ -659,7 +806,7 @@ class CaseDB:
             safe_query = _fts5_any_query(query)
         else:
             stmt = stmt.order_by(
-                windows_t.c.event_time.asc().nullslast(),
+                func.mulder_time(windows_t.c.event_time).asc().nullslast(),
             ).limit(max_results)
             safe_query = _sanitize_fts5_query(query)
 
@@ -739,9 +886,13 @@ class CaseDB:
             stmt = stmt.where(windows_t.c.source_id.in_(source_ids))
 
         if time_start is not None:
-            stmt = stmt.where(windows_t.c.event_time >= time_start)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) >= func.mulder_time(time_start)
+            )
         if time_end is not None:
-            stmt = stmt.where(windows_t.c.event_time <= time_end)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) <= func.mulder_time(time_end)
+            )
 
         if exclude_source_names:
             for prefix in exclude_source_names:
@@ -780,9 +931,13 @@ class CaseDB:
         stmt = select(windows_t).select_from(j).where(sources_t.c.source_name == source_name)
 
         if time_start is not None:
-            stmt = stmt.where(windows_t.c.event_time >= time_start)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) >= func.mulder_time(time_start)
+            )
         if time_end is not None:
-            stmt = stmt.where(windows_t.c.event_time <= time_end)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) <= func.mulder_time(time_end)
+            )
 
         stmt = stmt.order_by(windows_t.c.line_start)
 
@@ -886,9 +1041,13 @@ class CaseDB:
         )
 
         if time_start is not None:
-            stmt = stmt.where(windows_t.c.event_time >= time_start)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) >= func.mulder_time(time_start)
+            )
         if time_end is not None:
-            stmt = stmt.where(windows_t.c.event_time <= time_end)
+            stmt = stmt.where(
+                func.mulder_time(windows_t.c.event_time) <= func.mulder_time(time_end)
+            )
 
         stmt = stmt.order_by(windows_t.c.line_start)
 
@@ -1458,10 +1617,10 @@ class CaseDB:
             .select_from(j)
             .where(
                 windows_t.c.event_time.isnot(None),
-                windows_t.c.event_time >= time_start,
-                windows_t.c.event_time <= time_end,
+                func.mulder_time(windows_t.c.event_time) >= func.mulder_time(time_start),
+                func.mulder_time(windows_t.c.event_time) <= func.mulder_time(time_end),
             )
-            .order_by(windows_t.c.event_time)
+            .order_by(func.mulder_time(windows_t.c.event_time))
         )
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).fetchall()

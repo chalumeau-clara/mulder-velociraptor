@@ -266,6 +266,11 @@ class EvidenceClassifier:
             return ClassifiedEvidence(path=path, artifact_type="network_capture")
 
         if ext in _ARCHIVE_EXTS or name.endswith(".tar.gz") or name.endswith(".tar.bz2"):
+            if ext == ".zip":
+                from mulder.extractors.velociraptor import collection_kind
+
+                if collection_kind(path) is not None:
+                    return ClassifiedEvidence(path=path, artifact_type="velociraptor_collection")
             return ClassifiedEvidence(path=path, artifact_type="compressed_archive")
 
         if ext in _EVTX_EXTS:

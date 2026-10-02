@@ -178,6 +178,20 @@ def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
                 sha256=h.hexdigest(),
                 size_bytes=size,
             )
+            if item.get("artifact_type") == "velociraptor_collection":
+                key = "velociraptor.import:" + str(fp.resolve())
+                previous = json.loads(ctx.db.get_kv(key) or "{}")
+                if previous.get("collection_sha256") != h.hexdigest():
+                    ctx.db.set_kv(
+                        key,
+                        json.dumps(
+                            {
+                                "status": "pending",
+                                "collection_path": str(fp.resolve()),
+                                "collection_sha256": h.hexdigest(),
+                            }
+                        ),
+                    )
         except Exception as exc:
             logger.warning("Failed to hash evidence file %s: %s", fp, exc)
             failed_files.append(str(fp))
@@ -202,6 +216,18 @@ def _manifest_entry(item: ClassifiedEvidence) -> dict[str, object]:
         if media is not None:
             entry["media"] = f"optical ({media})"
             entry["note"] = "CD/DVD image: use run_optical_listing, not run_fls/run_mmls"
+    if item.artifact_type == "velociraptor_collection":
+        from mulder.extractors.velociraptor import CollectionError, inspect_collection
+
+        try:
+            inventory = inspect_collection(item.path)
+            entry["collection"] = {
+                key: inventory[key]
+                for key in ("hostname", "os", "collection_id", "artifact_count", "upload_count")
+            }
+            entry["note"] = "Use inspect_velociraptor_collection, then import during extraction"
+        except (CollectionError, OSError, zipfile.BadZipFile) as exc:
+            entry["collection_error"] = str(exc)
     return entry
 
 

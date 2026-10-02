@@ -7,6 +7,7 @@ a finding, and applicable forensic tools that were never invoked.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -31,6 +32,7 @@ from mulder.server.tools.findings import _evaluate_finalize_gates
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
+    "velociraptor_collection": ["import_velociraptor_collection"],
     "memory_dump": [
         "run_volatility",
         "run_volatility_batch",
@@ -220,6 +222,13 @@ def audit_tool_coverage() -> dict[str, object]:
 
         run = [t for t in applicable if t in tools_invoked]
         not_run = [t for t in applicable if t not in tools_invoked]
+        if ev.artifact_type == "velociraptor_collection":
+            # A successful import of host A says nothing about collection B.
+            state = json.loads(
+                ctx.db.get_kv("velociraptor.import:" + str(ev.path.resolve())) or "{}"
+            )
+            run = applicable if state.get("status") == "success" else []
+            not_run = [] if run else applicable
         total_gaps += len(not_run)
 
         items.append(
@@ -412,6 +421,17 @@ def get_investigation_summary() -> dict[str, object]:
     if "audit_tool_coverage" not in tool_counts:
         remaining_work.append("Run audit_tool_coverage to verify all applicable tools were used")
 
+    collection_imports: list[dict[str, object]] = []
+    paths = {str(row["file_path"]) for row in ctx.db.get_evidence_registry()}
+    paths.update(s.source_path for s in sources)
+    for path in sorted(paths):
+        state_json = ctx.db.get_kv("velociraptor.import:" + path)
+        if state_json:
+            collection_imports.append(json.loads(state_json))
+    collection_gaps = [state for state in collection_imports if state.get("status") != "success"]
+    if collection_gaps:
+        remaining_work.append("Resolve or document incomplete Velociraptor collection imports")
+
     elapsed = (time.monotonic() - t0) * 1000
     ctx.audit.log_tool_call(
         tool_call_id=tc_id,
@@ -433,6 +453,8 @@ def get_investigation_summary() -> dict[str, object]:
         "negative_findings": has_negative,
         "extraction_batches": batch_info,
         "remaining_work": remaining_work,
+        "collection_imports": collection_imports,
+        "collection_import_gaps": collection_gaps,
         "ready_to_finalize": all_passed,
         "finalize_blockers": blockers if blockers else "none",
         "elapsed_ms": round(elapsed, 1),

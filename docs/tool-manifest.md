@@ -8,6 +8,17 @@ Every tool is exposed as `mcp__mulder__{name}`. All tools return a dict containi
 
 ## 1. Case Management
 
+### Offline Velociraptor collections
+
+See [Offline Velociraptor collections](velociraptor.md) for format limits and examples.
+
+| Tool | Parameters | Roles | Returns |
+|---|---|---|---|
+| `inspect_velociraptor_collection` | `collection_path: str`, `upload_offset: int = 0`, `upload_limit: int = 100` | `CATALOG`, `EXTRACT_PLANNER`, `EXTRACT_EXECUTOR` | Host metadata, artifact inventory, paginated upload members |
+| `import_velociraptor_collection` | `collection_path: str` | `EXTRACT_EXECUTOR` | Source/record counts, container hash, import errors, reported versus actual artifact counts |
+| `extract_velociraptor_file` | `collection_path: str`, `member_path: str` | `EXTRACT_EXECUTOR` | Local path/directory, original member, container/file hashes |
+| `index_velociraptor_evtx` | `collection_path: str`, `member_path: str`, `event_ids: list[int] \| None = None` | `EXTRACT_EXECUTOR` | Indexed uploaded EVTX records, event timestamps and provenance; sparse reconstruction when needed |
+
 ### scan_evidence
 
 Scan an evidence directory and create a new case for investigation.

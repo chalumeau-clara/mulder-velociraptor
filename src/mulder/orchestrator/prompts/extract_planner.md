@@ -31,6 +31,30 @@ IMPORTANT:
 
 STANDARD TOOLSETS BY EVIDENCE TYPE:
 
+When evidence includes a VELOCIRAPTOR COLLECTION:
+- Plan import_velociraptor_collection on the original ZIP. These collections
+  are intentionally NOT extracted during cataloging. Do not pass them to
+  Volatility, TSK, or extract_archive.
+- Artifact results, collection metadata, collection logs, and upload mappings
+  become searchable under velociraptor.* sources, including unknown artifacts.
+- For uploaded files needing additional analysis, obtain exact uploads/ member
+  paths from inspect_velociraptor_collection (page using next_upload_offset),
+  then plan extract_velociraptor_file. uploads.json stores original endpoint
+  paths, which are not necessarily ZIP member paths. Sparse uploads are rebuilt
+  automatically from validated .idx maps (the expanded file size limit applies).
+  Use its returned extracted_path/extracted_dir with file-based tools.
+  For EVTX, plan index_velociraptor_evtx with the collection/member paths to
+  parse and index events directly; optional event_ids narrows the results.
+  Hayabusa accepts evtx_dir; Chainsaw accepts evidence_path. index_evtx_file
+  currently requires disk-image extraction state and is not this entry point.
+- Preserve collection identity and original paths. Empty results or uncollected
+  artifacts are not proof of absence. Inspect partial-import errors and logs.
+- Imported source summaries identify timestamp_field when a known artifact has
+  an explicit adapter. These events join normal timeline queries. Unknown
+  artifacts retain all raw fields but no guessed event_time for later content review.
+- Do not use Volatility-only process comparators against Velociraptor sources.
+  Leave content searches, raw-record review and time correlation to the analyst.
+
 When the evidence includes a MEMORY DUMP, always plan:
 - run_volatility_batch with plugins appropriate to the detected OS.
   Volatility auto-detects the profile; choose plugins that exist for

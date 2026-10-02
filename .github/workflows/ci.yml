@@ -70,6 +70,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
 
+      - name: Install native tools for mixed evidence integration tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends sleuthkit e2fsprogs
+
       - name: Run tests
         run: uv run --locked --extra dev --python ${{ matrix.python-version }} pytest tests/ -v
 

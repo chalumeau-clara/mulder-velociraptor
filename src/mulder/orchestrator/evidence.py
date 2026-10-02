@@ -12,10 +12,12 @@ Contains two collaborators extracted from the Orchestrator:
 from __future__ import annotations
 
 import logging
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from mulder.extractors.optical import probe_optical
+from mulder.extractors.velociraptor import CollectionError, collection_kind, inspect_collection
 from mulder.orchestrator.types import PhaseResult, extract_catalog_result
 from mulder.patterns import DISK_IMAGE_EXTS, extract_iocs_from_text, resolve_db_dir
 
@@ -90,6 +92,23 @@ class EvidenceContext:
 
         sys_lower = system_name.lower()
 
+        collections: list[str] = []
+        collection_paths: set[Path] = set()
+        candidates = evidence_path.rglob("*") if evidence_path.is_dir() else [evidence_path]
+        for candidate in candidates:
+            if not candidate.is_file() or candidate.suffix.lower() != ".zip":
+                continue
+            if collection_kind(candidate) is None:
+                continue
+            collection_paths.add(candidate)
+            try:
+                inventory = inspect_collection(candidate)
+                host = str(inventory.get("hostname") or "")
+                if sys_lower == host.lower() or (not host and sys_lower in candidate.name.lower()):
+                    collections.append(f"  {candidate} (host={host!r})")
+            except (CollectionError, OSError, ValueError, zipfile.BadZipFile) as exc:
+                collections.append(f"  {candidate} (unavailable: {exc})")
+
         disk_images: list[str] = []
         if evidence_path.is_dir():
             for f in evidence_path.rglob("*"):
@@ -108,6 +127,8 @@ class EvidenceContext:
         if evidence_path.is_dir():
             for f in evidence_path.rglob("*"):
                 if not f.is_file():
+                    continue
+                if f in collection_paths:
                     continue
                 try:
                     rel = str(f.relative_to(evidence_path)).lower()
@@ -136,6 +157,9 @@ class EvidenceContext:
                             memory_dumps.append(str(f))
 
         lines: list[str] = [f"System: {system_name}"]
+        if collections:
+            lines.append("Velociraptor offline collections (plan import_velociraptor_collection):")
+            lines.extend(sorted(collections))
         if disk_images:
             lines.append("Disk images:")
             for p in sorted(disk_images):
@@ -158,7 +182,7 @@ class EvidenceContext:
             )
             for p in sorted(nested_archives):
                 lines.append(f"  {p}")
-        if not disk_images and not memory_dumps and not nested_archives:
+        if not disk_images and not memory_dumps and not nested_archives and not collections:
             lines.append(
                 "(No pre-populated paths available. "
                 f"Call list_directory on {self.evidence_path} to discover files.)"
